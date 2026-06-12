@@ -1,6 +1,7 @@
 import { 
   Controller, 
   Post, 
+  Get, // 🎯 Added for pulling knowledge source records
   Body, 
   Headers, 
   BadRequestException, 
@@ -11,10 +12,12 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { RagService } from './rag.service';
 import { IngestionService } from './ingestion.service';
 import 'multer';
+
+// Contract payloads mapped explicitly to allow optional source filtering
 interface SearchQueryDto {
   query: string;    
-  role?: string;
   limit?: number;
+  sourceId?: string; // Target a single file scope when provided
 }
 
 interface CreateSourceDto {
@@ -30,49 +33,60 @@ export class RagController {
     private readonly ingestionService: IngestionService 
   ) {}
 
+  @Get('sources')
+  async findAllSources(@Headers('x-tenant-id') tenantId: string) {
+    if (!tenantId) {
+      throw new BadRequestException('Missing structural context header x-tenant-id.');
+    }
+
+    // Returns array of dynamic knowledge sources scoped to this specific tenant
+    return this.ingestionService.getTenantSources(tenantId);
+  }
+
   @Post('search')
-async search(
-  @Headers('x-tenant-id') tenantId: string,
-  @Body() body: { query: string; limit?: number } 
-) {
-  if (!tenantId) {
-    throw new BadRequestException('Missing structural context header x-tenant-id.');
+  async search(
+    @Headers('x-tenant-id') tenantId: string,
+    @Body() body: SearchQueryDto 
+  ) {
+    if (!tenantId) {
+      throw new BadRequestException('Missing structural context header x-tenant-id.');
+    }
+    if (!body.query) {
+      throw new BadRequestException('Property "query" text string must be provided in body.');
+    }
+
+    // 1. Hit Supabase to pull back vector chunks (passing the optional sourceId filter)
+    const matchingChunks = await this.ragService.searchVectorChunks(
+      tenantId, 
+      body.query, 
+      'user', 
+      body.limit || 3,
+      body.sourceId 
+    );
+
+    // 2. Fetch the true source name dynamically to update the system instructions
+    let dynamicSourceName = 'Uploaded Knowledge Base';
+    if (matchingChunks.length > 0) {
+      dynamicSourceName = await this.ragService.getSourceName(matchingChunks[0].sourceId);
+    }
+
+    // 3. Send chunks and query to Llama-3 to compile the synthesized answer
+    const refinedAnswer = await this.ragService.refineAnswer(
+      body.query, 
+      matchingChunks,
+      dynamicSourceName
+    );
+
+    // 4. Return both the refined answer AND matching trace fragments back to React playground
+    return {
+      answer: refinedAnswer,
+      references: matchingChunks.map(chunk => ({
+        id: chunk.id,
+        similarityScore: chunk.similarity,
+        snippet: chunk.content.substring(0, 120) + '...' 
+      }))
+    };
   }
-  if (!body.query) {
-    throw new BadRequestException('Property "query" text string must be provided in body.');
-  }
-
-  // 1. Hit Supabase to pull back closest matching vector coordinates
-  const matchingChunks = await this.ragService.searchVectorChunks(
-    tenantId, 
-    body.query, 
-    'user', 
-    body.limit || 3
-  );
-
-  // 2. Fetch the true source name of the top-ranked match to keep system instructions dynamic
-  let dynamicSourceName = 'Uploaded Knowledge Base';
-  if (matchingChunks.length > 0) {
-    dynamicSourceName = await this.ragService.getSourceName(matchingChunks[0].sourceId);
-  }
-
-  // 3. Send chunks and query to Llama-3 to compile the synthesized answer
-  const refinedAnswer = await this.ragService.refineAnswer(
-    body.query, 
-    matchingChunks,
-    dynamicSourceName
-  );
-
-  // 4. Return both the refined answer AND matching trace fragments
-  return {
-    answer: refinedAnswer,
-    references: matchingChunks.map(chunk => ({
-      id: chunk.id,
-      similarityScore: chunk.similarity,
-      snippet: chunk.content.substring(0, 80) + '...'
-    }))
-  };
-}
 
   @Post('ingest')
   async ingest(
@@ -114,7 +128,7 @@ async search(
   }
 
   @Post('ingest-file')
-  @UseInterceptors(FileInterceptor('file')) // 'file' matches the key name inside Postman form-data
+  @UseInterceptors(FileInterceptor('file')) // 'file' matches the key name inside our React FormData structure
   async ingestFile(
     @Headers('x-tenant-id') tenantId: string,
     @Body('sourceId') sourceId: string, // Form-data string fields are read directly from @Body

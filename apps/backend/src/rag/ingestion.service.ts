@@ -1,5 +1,6 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { schema } from '@anode/supabase';
+import { eq, desc } from 'drizzle-orm';
 import type { DbClient } from '@anode/supabase'; 
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto'; // 👈 IMPORT THIS FOR UNIQUE ID GENERATION
@@ -47,6 +48,26 @@ export class IngestionService {
       startIndex += chunkSize - chunkOverlap;
     }
     return chunks;
+  }
+
+  async getTenantSources(tenantId: string) {
+    try {
+      const results = await this.database
+        .select({
+          id: schema.knowledgeSources.id,
+          name: schema.knowledgeSources.name,
+          type: schema.knowledgeSources.type,
+          createdAt: schema.knowledgeSources.createdAt,
+        })
+        .from(schema.knowledgeSources)
+        .where(eq(schema.knowledgeSources.tenantId, tenantId))
+        .orderBy(desc(schema.knowledgeSources.createdAt)); // Newest documents first
+
+      return results;
+    } catch (error) {
+      console.error('Failed to retrieve knowledge sources for tenant:', error);
+      throw new Error(`Database context lookup failed: ${(error as any).message}`);
+    }
   }
 
   async processIngestion(tenantId: string, sourceId: string, rawContent: string) {

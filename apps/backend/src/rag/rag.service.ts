@@ -18,13 +18,14 @@ export class RagService {
 
   /**
    * Core Search: Converts natural user text into a vector, queries Supabase,
-   * and clamps results strictly to the provided tenant boundary.
+   * and clamps results strictly to the provided tenant boundary with optional file filtering.
    */
   async searchVectorChunks(
     tenantId: string,
     queryText: string,
-    minRole = 'user',
-    limit = 3
+    minRole = 'user', // Retained position for internal architectural consistency
+    limit = 3,
+    sourceId?: string // 🎯 Added and placed safely to handle precise frontend tracking
   ): Promise<any[]> {
     // 1. Generate the raw vector coordinates for the user query string
     const response = await fetch(
@@ -56,10 +57,20 @@ export class RagService {
 
     const vectorString = `[${queryVector?.join(',')}]`;
 
-    // 3. Execute Vector Cosine Similarity Search inside Supabase using Drizzle
-    // Considers tenant context and filters out data before running math algorithms
+    // 3. Construct base filters with strict multi-tenant boundary constraint
     const similarityExpression = sql`1 - (${schema.chunks.embedding} <=> ${vectorString}::vector)`;
+    
+    const filters = [
+      eq(schema.chunks.tenantId, tenantId), // 🔒 IRONCLAD TENANT GUARDRAIL
+      sql`1 - (${schema.chunks.embedding} <=> ${vectorString}::vector) > 0.3` // Threshold validation filter
+    ];
 
+    // 🎯 DYNAMIC FILE FILTER: If a specific sourceId comes from the controller, restrict the search
+    if (sourceId) {
+      filters.push(eq(schema.chunks.sourceId, sourceId));
+    }
+
+    // 4. Execute Vector Cosine Similarity Search inside Supabase using Drizzle
     const matchingChunks = await this.database
       .select({
         id: schema.chunks.id,
@@ -69,12 +80,7 @@ export class RagService {
         similarity: similarityExpression,
       })
       .from(schema.chunks)
-      .where(
-        and(
-          eq(schema.chunks.tenantId, tenantId), // 🔒 IRONCLAD TENANT GUARDRAIL
-          sql`1 - (${schema.chunks.embedding} <=> ${vectorString}::vector) > 0.3` // Only pull relevant chunks
-        )
-      )
+      .where(and(...filters)) // 👈 Dynamically flattens our applied tenant and source parameters
       .orderBy(sql`(${schema.chunks.embedding} <=> ${vectorString}::vector) ASC`) // Closest distance first
       .limit(limit);
 
@@ -135,7 +141,7 @@ Core Rules:
         }
       );
 
-      if (!response.ok) {
+    if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`Hugging Face Inference Router failed: ${errorText}`);
       }
@@ -145,7 +151,6 @@ Core Rules:
 
     } catch (error) {
       console.error('RAG Error during LLM Refinement:', error);
-      // Cast error as 'any' or an Error object explicitly to clear the compiler warning
       throw new Error(`Failed to synthesize answer via LLM: ${(error as any).message}`);
     }
   }
