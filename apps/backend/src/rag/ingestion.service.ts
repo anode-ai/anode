@@ -1,36 +1,46 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { schema } from '@anode/supabase';
 import { eq, desc } from 'drizzle-orm';
-import type { DbClient } from '@anode/supabase'; 
+import type { DbClient } from '@anode/supabase';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'crypto'; // 👈 IMPORT THIS FOR UNIQUE ID GENERATION
+import { randomUUID } from 'crypto';
 
 @Injectable()
 export class IngestionService {
   private hfToken: string;
 
   constructor(
-    @Inject('DRIZZLE_DATABASE_CONNECTION') private readonly database: DbClient, 
+    @Inject('DRIZZLE_DATABASE_CONNECTION') private readonly database: DbClient,
     private readonly configService: ConfigService,
   ) {
-    // Grabs your Hugging Face token securely from system memory environment variables
     this.hfToken = this.configService.get<string>('OPENAI_API_KEY') || '';
   }
 
-  async createSource(tenantId: string, name: string, type: 'file' | 'url', location?: string) {
-    // 1. Generate a brand-new, production-safe unique UUID anchor
-    const newSourceId = randomUUID();
-
-    // 2. Insert the metadata row layout cleanly inside your Supabase schema using Drizzle
-    await this.database.insert(schema.knowledgeSources).values({
-      id: newSourceId,
-      tenantId: tenantId,
-      name: name,
-      type: type,
-      ...(location && { location }), // Stash optional URL maps or file system traces if given
+  // Resolve a Clerk org ID (e.g. "org_xxx") to the internal tenants.id (uuid)
+  private async resolveTenant(clerkTenantId: string) {
+    const tenant = await this.database.query.tenants.findFirst({
+      where: eq(schema.tenants.tenantId, clerkTenantId),
     });
 
-    // 3. Return the exact ID details so Postman/Frontend workflows can immediately use it
+    if (!tenant) {
+      throw new Error(`No tenant found for tenantId: ${clerkTenantId}`);
+    }
+
+    return tenant;
+  }
+
+  async createSource(clerkTenantId: string, name: string, type: 'file' | 'url', location?: string) {
+    const tenant = await this.resolveTenant(clerkTenantId);
+    const newSourceId = randomUUID();
+
+    await this.database.insert(schema.knowledgeSources).values({
+      id: newSourceId,
+      tenantId: tenant.id,
+      name: name,
+      type: type,
+      ...(location && { location }),
+    });
+
     return {
       success: true,
       message: 'Knowledge source registered successfully.',
@@ -50,8 +60,10 @@ export class IngestionService {
     return chunks;
   }
 
-  async getTenantSources(tenantId: string) {
+  async getTenantSources(clerkTenantId: string) {
     try {
+      const tenant = await this.resolveTenant(clerkTenantId);
+
       const results = await this.database
         .select({
           id: schema.knowledgeSources.id,
@@ -60,8 +72,8 @@ export class IngestionService {
           createdAt: schema.knowledgeSources.createdAt,
         })
         .from(schema.knowledgeSources)
-        .where(eq(schema.knowledgeSources.tenantId, tenantId))
-        .orderBy(desc(schema.knowledgeSources.createdAt)); // Newest documents first
+        .where(eq(schema.knowledgeSources.tenantId, tenant.id))
+        .orderBy(desc(schema.knowledgeSources.createdAt));
 
       return results;
     } catch (error) {
@@ -70,16 +82,17 @@ export class IngestionService {
     }
   }
 
-  async processIngestion(tenantId: string, sourceId: string, rawContent: string) {
+  async processIngestion(clerkTenantId: string, sourceId: string, rawContent: string) {
+    const tenant = await this.resolveTenant(clerkTenantId);
+
     const textSegments = this.chunkText(rawContent);
     if (textSegments.length === 0) return { success: true, chunksProcessed: 0 };
 
-    // 1. Call Hugging Face Serverless API with the explicit feature-extraction pipeline task suffix
     const response = await fetch(
       "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-mpnet-base-v2/pipeline/feature-extraction",
       {
-        headers: { 
-          Authorization: `Bearer ${this.hfToken}`, 
+        headers: {
+          Authorization: `Bearer ${this.hfToken}`,
           "Content-Type": "application/json",
           "x-wait-for-model": "true"
         },
@@ -92,38 +105,33 @@ export class IngestionService {
       throw new Error(`Hugging Face API failed: ${errorText}`);
     }
 
-    // Hugging Face returns an array of vector arrays: number[][]
     const embeddings: number[][] = await response.json();
 
-    // 2. Map text chunks with generated high-fidelity vector metrics
     const insertRecords = textSegments.map((segment, index) => {
       const rawVector = embeddings[index];
       let vector = Array.isArray(rawVector) ? (rawVector as any).flat() : rawVector;
-      
+
       if (!vector || vector.length === 0) {
         throw new Error(`Failed to map vector embedding index ${index}`);
       }
 
-      // Handle Hugging Face 768 dimensions to 1536 padding
       if (vector.length === 768) {
         const padding = new Array(768).fill(0);
         vector = [...vector, ...padding];
       }
 
-      // Convert the array into a strictly bracketed string format.
       const vectorStringFormat = `[${vector.join(',')}]`;
 
       return {
-        tenantId,
+        tenantId: tenant.id,
         sourceId,
         content: segment,
-        embedding: vectorStringFormat as any, // Cast as any so Drizzle sends raw string through
+        embedding: vectorStringFormat as any,
         minRole: 'user',
         metadata: { index, charLength: segment.length },
       };
     });
 
-    // 3. Insert records directly into your Supabase columns via Drizzle
     await this.database.insert(schema.chunks).values(insertRecords);
 
     return {

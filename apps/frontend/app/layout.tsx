@@ -1,7 +1,7 @@
 import "@anode/ui/globals.css";
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
-
+import { ClerkProvider } from "@clerk/nextjs";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
@@ -16,7 +16,11 @@ export default function RootLayout({
 }): JSX.Element {
   return (
     <html lang="en">
-      <body className={inter.className} suppressHydrationWarning>{children}</body>
+      
+      {/* <body className={inter.className} suppressHydrationWarning>{children}</body> */}
+      <body className={inter.className} suppressHydrationWarning>
+        <ClerkProvider>{children}</ClerkProvider>
+      </body>
     </html>
   );
 }

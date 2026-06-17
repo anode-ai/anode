@@ -14,8 +14,10 @@ import {
   FolderOpen,
   Zap,
   FileSearch,
+  Link as LinkIcon,
 } from 'lucide-react';
 
+import { useAuth, useOrganization, Show, RedirectToSignIn, useClerk } from '@clerk/nextjs';
 import { Button } from '@anode/ui/components/ui/button';
 import { Input } from '@anode/ui/components/ui/input';
 import { Label } from '@anode/ui/components/ui/label';
@@ -38,33 +40,54 @@ interface KnowledgeSource {
   createdAt: string;
 }
 
-export default function RagPlayground() {
-  const TENANT_ID = process.env.NEXT_PUBLIC_TENANT_ID;
+function RagPlaygroundInner() {
   const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL;
+
+  const { getToken, isLoaded: authLoaded } = useAuth();
+  const { organization, isLoaded: orgLoaded } = useOrganization();
+  const { signOut } = useClerk();
+
+  // Tenant ID is derived from the active Clerk organization
+  const TENANT_ID = organization?.id;
 
   const [sources, setSources] = useState<KnowledgeSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string>('global');
 
+  // Ingestion States
+  const [ingestMode, setIngestMode] = useState<'file' | 'link'>('file');
   const [sourceName, setSourceName] = useState('');
   const [file, setFile] = useState<File | null>(null);
+  const [url, setUrl] = useState('');
   const [ingestStatus, setIngestStatus] = useState({ type: '', msg: '' });
   const [isIngesting, setIsIngesting] = useState(false);
 
+  // Search States
   const [queryText, setQueryText] = useState('');
   const [limit, setLimit] = useState(3);
   const [answer, setAnswer] = useState('');
   const [references, setReferences] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [mounted, setMounted] = useState(false);
+  
   useEffect(() => setMounted(true), []);
 
+  // Helper: build auth + tenant headers for backend requests
+  const getAuthHeaders = async (extra: Record<string, string> = {}) => {
+    const token = await getToken();
+    return {
+      Authorization: `Bearer ${token}`,
+      ...(TENANT_ID ? { 'x-tenant-id': TENANT_ID } : {}),
+      ...extra,
+    };
+  };
+
   const fetchSources = async () => {
+    if (!TENANT_ID) return;
     try {
+      const headers = await getAuthHeaders();
       const res = await fetch(`${BACKEND_URL}/rag/sources`, {
         method: 'GET',
-        headers: {
-          'x-tenant-id': TENANT_ID as string,
-        },
+        headers,
       });
       if (res.ok) {
         const data = await res.json();
@@ -76,13 +99,30 @@ export default function RagPlayground() {
   };
 
   useEffect(() => {
-    fetchSources();
-  }, []);
+    if (authLoaded && orgLoaded && TENANT_ID) {
+      fetchSources();
+    }
+  }, [authLoaded, orgLoaded, TENANT_ID]);
 
   const handleIngestion = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!sourceName || !file) {
-      setIngestStatus({ type: 'error', msg: 'Please enter a source name and select a file.' });
+    if (!sourceName) {
+      setIngestStatus({ type: 'error', msg: 'Please enter a source name.' });
+      return;
+    }
+    
+    if (ingestMode === 'file' && !file) {
+      setIngestStatus({ type: 'error', msg: 'Please select a file to upload.' });
+      return;
+    }
+
+    if (ingestMode === 'link' && !url) {
+      setIngestStatus({ type: 'error', msg: 'Please enter a valid website URL.' });
+      return;
+    }
+
+    if (!TENANT_ID) {
+      setIngestStatus({ type: 'error', msg: 'No active organization selected.' });
       return;
     }
 
@@ -90,39 +130,72 @@ export default function RagPlayground() {
     setIngestStatus({ type: 'info', msg: 'Registering knowledge source entry...' });
 
     try {
+      const jsonHeaders = await getAuthHeaders({ 'Content-Type': 'application/json' });
+
+      // 1. Create Source Metadata (Shared for both file and link)
       const sourceRes = await fetch(`${BACKEND_URL}/rag/source`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': TENANT_ID as string,
-        },
-        body: JSON.stringify({ name: sourceName, type: 'file' }),
+        headers: jsonHeaders,
+        body: JSON.stringify({ name: sourceName, type: ingestMode }),
       });
 
       if (!sourceRes.ok) throw new Error('Failed to register knowledge source record.');
       const sourceData = await sourceRes.json();
       const sourceId = sourceData.id || sourceData.sourceId;
 
-      setIngestStatus({ type: 'info', msg: 'Source created. Extracting and embedding vectors...' });
+      if (ingestMode === 'file') {
+        // --- FILE INGESTION PIPELINE ---
+        setIngestStatus({ type: 'info', msg: 'Source created. Extracting and embedding vectors...' });
 
-      const formData = new FormData();
-      formData.append('sourceId', sourceId);
-      formData.append('file', file);
+        const formData = new FormData();
+        formData.append('sourceId', sourceId);
+        formData.append('file', file as File);
 
-      const ingestRes = await fetch(`${BACKEND_URL}/rag/ingest-file`, {
-        method: 'POST',
-        headers: {
-          'x-tenant-id': TENANT_ID as string,
-        },
-        body: formData,
-      });
+        const fileHeaders = await getAuthHeaders();
+        const ingestRes = await fetch(`${BACKEND_URL}/rag/ingest-file`, {
+          method: 'POST',
+          headers: fileHeaders,
+          body: formData,
+        });
 
-      if (!ingestRes.ok) throw new Error('File chunk extraction or embedding task failed.');
+        if (!ingestRes.ok) throw new Error('File chunk extraction or embedding task failed.');
 
-      setIngestStatus({ type: 'success', msg: `Successfully vectorized and saved "${file.name}"!` });
+        setIngestStatus({ type: 'success', msg: `Successfully vectorized and saved "${file!.name}"!` });
+        setFile(null);
+      } else {
+        // --- LINK INGESTION PIPELINE ---
+        setIngestStatus({ type: 'info', msg: 'Crawling website content...' });
+
+        const crawlRes = await fetch(`${BACKEND_URL}/crawler?url=${encodeURIComponent(url)}`, {
+          method: 'GET',
+          headers: await getAuthHeaders(),
+        });
+
+        if (!crawlRes.ok) throw new Error('Failed to crawl the provided URL.');
+        const crawlData = await crawlRes.json();
+
+        if (!crawlData.text) {
+          throw new Error('Crawler returned empty content. Cannot ingest.');
+        }
+
+        setIngestStatus({ type: 'info', msg: 'Website crawled. Embedding text chunks...' });
+
+        const ingestRes = await fetch(`${BACKEND_URL}/rag/ingest`, {
+          method: 'POST',
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            sourceId: sourceId,
+            content: crawlData.text,
+          }),
+        });
+
+        if (!ingestRes.ok) throw new Error('Link chunk extraction or embedding task failed.');
+
+        setIngestStatus({ type: 'success', msg: `Successfully vectorized and saved link content!` });
+        setUrl('');
+      }
+
       setSourceName('');
-      setFile(null);
-
       await fetchSources();
     } catch (err: any) {
       setIngestStatus({ type: 'error', msg: err.message || 'Ingestion failure occurred.' });
@@ -131,21 +204,28 @@ export default function RagPlayground() {
     }
   };
 
+  const handleLogout = async () => {
+    await signOut();
+  };
+
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!queryText.trim()) return;
+    if (!TENANT_ID) {
+      setAnswer('Error: No active organization selected.');
+      return;
+    }
 
     setIsSearching(true);
     setAnswer('');
     setReferences([]);
 
     try {
+      const headers = await getAuthHeaders({ 'Content-Type': 'application/json' });
+
       const response = await fetch(`${BACKEND_URL}/rag/search`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': TENANT_ID as string,
-        },
+        headers,
         body: JSON.stringify({
           query: queryText,
           limit: limit,
@@ -165,9 +245,31 @@ export default function RagPlayground() {
     }
   };
 
+  // Wait for Clerk auth/org state before rendering anything tenant-dependent
+  if (!authLoaded || !orgLoaded) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 p-6 font-sans flex items-center justify-center">
+        <Loader2 className="w-6 h-6 animate-spin text-indigo-400" />
+      </div>
+    );
+  }
+
+  if (!TENANT_ID) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 p-6 font-sans flex items-center justify-center">
+        <Alert className="max-w-md bg-slate-900 border-slate-800 text-slate-300">
+          <Info className="w-4 h-4" />
+          <AlertDescription>
+            No active organization. Please select or create an organization to access the RAG workspace.
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-6 font-sans">
-      <header className="mb-8 border-b border-slate-800 pb-5">
+      <header className="mb-8 border-b border-slate-800 pb-5 flex justify-between items-start">
         <div className="flex items-center gap-3">
           <div className="bg-indigo-500/10 p-2 rounded-lg border border-indigo-500/20">
             <Sparkles className="w-6 h-6 text-indigo-400" />
@@ -177,8 +279,14 @@ export default function RagPlayground() {
             <p className="text-slate-400 mt-1 text-sm">
               Testing sandbox for isolated multi-tenant file ingestion and structured semantic search.
             </p>
+            <p className="text-slate-500 mt-1 text-xs">
+              Organization: <span className="text-slate-300 font-medium">{organization?.name}</span>
+            </p>
           </div>
         </div>
+        <Button onClick={handleLogout} variant="outline" className="border-slate-700 text-slate-300 hover:bg-slate-800 hover:text-white">
+          Logout
+        </Button>
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
@@ -191,6 +299,30 @@ export default function RagPlayground() {
             </CardTitle>
           </CardHeader>
           <CardContent>
+            {/* INGESTION MODE TOGGLE */}
+            <div className="flex bg-slate-950 p-1 rounded-lg mb-6 border border-slate-800">
+              <button
+                type="button"
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-semibold rounded-md transition-colors ${
+                  ingestMode === 'file' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'
+                }`}
+                onClick={() => setIngestMode('file')}
+                disabled={isIngesting}
+              >
+                <FileText className="w-4 h-4" /> Upload File
+              </button>
+              <button
+                type="button"
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-xs font-semibold rounded-md transition-colors ${
+                  ingestMode === 'link' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'
+                }`}
+                onClick={() => setIngestMode('link')}
+                disabled={isIngesting}
+              >
+                <LinkIcon className="w-4 h-4" /> Crawl Link
+              </button>
+            </div>
+
             <form onSubmit={handleIngestion} className="space-y-4">
               <div className="space-y-2">
                 <Label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -198,7 +330,7 @@ export default function RagPlayground() {
                 </Label>
                 <Input
                   type="text"
-                  placeholder="e.g., Plant Biology Chapter 1"
+                  placeholder={ingestMode === 'file' ? "e.g., Plant Biology Chapter 1" : "e.g., Example Domain Docs"}
                   value={sourceName}
                   onChange={(e) => setSourceName(e.target.value)}
                   disabled={isIngesting}
@@ -206,35 +338,51 @@ export default function RagPlayground() {
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                  Upload Plain Text Document
-                </Label>
-                <label
-                  htmlFor="file-upload"
-                  className={`flex items-center gap-3 w-full bg-slate-950 border border-dashed border-slate-700 rounded-lg px-4 py-3 text-sm cursor-pointer transition-colors hover:border-indigo-500 ${
-                    isIngesting ? 'opacity-50 pointer-events-none' : ''
-                  }`}
-                >
-                  <UploadCloud className="w-4 h-4 text-slate-400 shrink-0" />
-                  <span className="text-slate-400 truncate">
-                    {file ? file.name : 'Click to choose a .txt file'}
-                  </span>
-                  <input
-                    id="file-upload"
-                    type="file"
-                    accept=".txt"
-                    onChange={(e) => setFile(e.target.files?.[0] || null)}
+              {ingestMode === 'file' ? (
+                <div className="space-y-2 animate-in fade-in duration-300">
+                  <Label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                    Upload Plain Text Document
+                  </Label>
+                  <label
+                    htmlFor="file-upload"
+                    className={`flex items-center gap-3 w-full bg-slate-950 border border-dashed border-slate-700 rounded-lg px-4 py-3 text-sm cursor-pointer transition-colors hover:border-indigo-500 ${
+                      isIngesting ? 'opacity-50 pointer-events-none' : ''
+                    }`}
+                  >
+                    <UploadCloud className="w-4 h-4 text-slate-400 shrink-0" />
+                    <span className="text-slate-400 truncate">
+                      {file ? file.name : 'Click to choose a .txt file'}
+                    </span>
+                    <input
+                      id="file-upload"
+                      type="file"
+                      accept=".txt"
+                      onChange={(e) => setFile(e.target.files?.[0] || null)}
+                      disabled={isIngesting}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              ) : (
+                <div className="space-y-2 animate-in fade-in duration-300">
+                  <Label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                    Website URL
+                  </Label>
+                  <Input
+                    type="url"
+                    placeholder="https://example.com"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
                     disabled={isIngesting}
-                    className="hidden"
+                    className="bg-slate-950 border-slate-700 text-white placeholder-slate-500 focus-visible:ring-indigo-500"
                   />
-                </label>
-              </div>
+                </div>
+              )}
 
               <Button
                 type="submit"
                 disabled={isIngesting}
-                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold transition-colors"
+                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold transition-colors mt-2"
               >
                 {isIngesting ? (
                   <>
@@ -243,8 +391,8 @@ export default function RagPlayground() {
                   </>
                 ) : (
                   <>
-                    <UploadCloud className="w-4 h-4 mr-2" />
-                    Upload & Process Ingestion
+                    {ingestMode === 'file' ? <UploadCloud className="w-4 h-4 mr-2" /> : <Globe className="w-4 h-4 mr-2" />}
+                    {ingestMode === 'file' ? 'Upload & Process Ingestion' : 'Crawl & Process Ingestion'}
                   </>
                 )}
               </Button>
@@ -286,35 +434,38 @@ export default function RagPlayground() {
                   Search Context Scope
                 </Label>
                 {mounted ? (
-    <Select value={selectedSourceId} onValueChange={setSelectedSourceId} disabled={isSearching}>
-      <SelectTrigger className="bg-slate-950 border-slate-700 text-slate-200 focus:ring-emerald-500">
-        <SelectValue placeholder="Select scope" />
-      </SelectTrigger>
-      <SelectContent className="bg-slate-950 border-slate-700 text-slate-200">
-        <SelectItem value="global">
-          <span className="flex items-center gap-2">
-            <Globe className="w-4 h-4 text-emerald-400" />
-            Global Tenant Scope (Search All Uploaded Files)
-          </span>
-        </SelectItem>
-        {sources.map((source) => (
-          <SelectItem key={source.id} value={source.id}>
-            <span className="flex items-center gap-2">
-              <FileText className="w-4 h-4 text-indigo-400" />
-              {source.name}
-              <span className="text-slate-500 text-xs">
-                ({new Date(source.createdAt).toLocaleDateString()})
-              </span>
-            </span>
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  ) : (
-    /* 🛠️ SKELETON PLACEHOLDER MATCHING THE DOCKING COMPONENT HEIGHT */
-    <div className="h-10 bg-slate-950 border border-slate-800 rounded-lg animate-pulse" />
-  )}
-
+                  <Select value={selectedSourceId} onValueChange={setSelectedSourceId} disabled={isSearching}>
+                    <SelectTrigger className="bg-slate-950 border-slate-700 text-slate-200 focus:ring-emerald-500">
+                      <SelectValue placeholder="Select scope" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-slate-950 border-slate-700 text-slate-200">
+                      <SelectItem value="global">
+                        <span className="flex items-center gap-2">
+                          <Globe className="w-4 h-4 text-emerald-400" />
+                          Global Tenant Scope (Search All Uploaded Files)
+                        </span>
+                      </SelectItem>
+                      {sources.map((source) => (
+                        <SelectItem key={source.id} value={source.id}>
+                          <span className="flex items-center gap-2">
+                            {source.type === 'link' ? (
+                              <LinkIcon className="w-4 h-4 text-indigo-400" />
+                            ) : (
+                              <FileText className="w-4 h-4 text-indigo-400" />
+                            )}
+                            {source.name}
+                            <span className="text-slate-500 text-xs">
+                              ({new Date(source.createdAt).toLocaleDateString()})
+                            </span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  /* 🛠️ SKELETON PLACEHOLDER MATCHING THE DOCKING COMPONENT HEIGHT */
+                  <div className="h-10 bg-slate-950 border border-slate-800 rounded-lg animate-pulse" />
+                )}
               </div>
 
               <div className="flex gap-2">
@@ -357,7 +508,7 @@ export default function RagPlayground() {
                   max={5}
                   step={1}
                   value={[limit]}
-                  onValueChange={(val:any) => setLimit(val[0])}
+                  onValueChange={(val: any) => setLimit(val[0])}
                   disabled={isSearching}
                   className="[&_[role=slider]]:bg-emerald-500 [&_[role=slider]]:border-emerald-500"
                 />
@@ -441,5 +592,18 @@ export default function RagPlayground() {
         </Card>
       </div>
     </div>
+  );
+}
+
+export default function RagPlayground() {
+  return (
+    <>
+      <Show when="signed-out">
+        <RedirectToSignIn />
+      </Show>
+      <Show when="signed-in">
+        <RagPlaygroundInner />
+      </Show>
+    </>
   );
 }

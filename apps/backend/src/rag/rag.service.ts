@@ -16,17 +16,33 @@ export class RagService {
     this.hfToken = this.configService.get<string>('OPENAI_API_KEY') || '';
   }
 
+  // Resolve a Clerk org ID (e.g. "org_xxx") to the internal tenants.id (uuid)
+  private async resolveTenant(clerkTenantId: string) {
+    const tenant = await this.database.query.tenants.findFirst({
+      where: eq(schema.tenants.tenantId, clerkTenantId),
+    });
+
+    if (!tenant) {
+      throw new Error(`No tenant found for tenantId: ${clerkTenantId}`);
+    }
+
+    return tenant;
+  }
+
   /**
    * Core Search: Converts natural user text into a vector, queries Supabase,
    * and clamps results strictly to the provided tenant boundary with optional file filtering.
    */
   async searchVectorChunks(
-    tenantId: string,
+    clerkTenantId: string,
     queryText: string,
     minRole = 'user', // Retained position for internal architectural consistency
     limit = 3,
     sourceId?: string // 🎯 Added and placed safely to handle precise frontend tracking
   ): Promise<any[]> {
+    // 0. Resolve Clerk org ID -> internal tenants.id (uuid)
+    const tenant = await this.resolveTenant(clerkTenantId);
+
     // 1. Generate the raw vector coordinates for the user query string
     const response = await fetch(
       "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-mpnet-base-v2/pipeline/feature-extraction",
@@ -59,9 +75,9 @@ export class RagService {
 
     // 3. Construct base filters with strict multi-tenant boundary constraint
     const similarityExpression = sql`1 - (${schema.chunks.embedding} <=> ${vectorString}::vector)`;
-    
+
     const filters = [
-      eq(schema.chunks.tenantId, tenantId), // 🔒 IRONCLAD TENANT GUARDRAIL
+      eq(schema.chunks.tenantId, tenant.id), // 🔒 IRONCLAD TENANT GUARDRAIL (internal uuid)
       sql`1 - (${schema.chunks.embedding} <=> ${vectorString}::vector) > 0.3` // Threshold validation filter
     ];
 
