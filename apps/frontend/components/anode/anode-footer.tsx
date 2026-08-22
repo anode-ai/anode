@@ -44,7 +44,7 @@ export function AnodeFooter() {
       id="colophon"
       className="relative border-t border-border/30 py-32 pl-6 pr-6 md:pl-28 md:pr-12"
     >
-      <div ref={gridRef} className="grid grid-cols-2 gap-8 md:grid-cols-4 md:gap-12">
+      <div ref={gridRef} className="grid grid-cols-2 gap-8 md:grid-cols-5 md:gap-12">
         <div className="col-span-2 md:col-span-1">
           <span className="font-[family-name:var(--font-bebas)] text-3xl tracking-wide text-foreground">ANODE</span>
           <p className="mt-3 max-w-[200px] font-mono text-xs leading-relaxed text-muted-foreground">
@@ -80,6 +80,25 @@ export function AnodeFooter() {
         </div>
 
         <div>
+          <h4 className="mb-4 font-mono text-[9px] uppercase tracking-[0.3em] text-muted-foreground">Account</h4>
+          <ul className="space-y-2">
+            {[
+              { label: "Sign in", href: "/login" },
+              { label: "Create account", href: "/signup" },
+            ].map(({ label, href }) => (
+              <li key={href}>
+                <a
+                  href={href}
+                  className="font-mono text-xs text-foreground/80 transition-colors duration-200 hover:text-accent"
+                >
+                  {label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div>
           <h4 className="mb-4 font-mono text-[9px] uppercase tracking-[0.3em] text-muted-foreground">Contact</h4>
           <ul className="space-y-2">
             <li>
@@ -106,9 +125,25 @@ export function AnodeFooter() {
         ref={footerRef}
         className="mt-24 flex flex-col gap-4 border-t border-border/20 pt-8 md:flex-row md:items-center md:justify-between"
       >
-        <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
-          © 2026 Anode. All rights reserved.
-        </p>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
+          <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+            © 2026 Anode. All rights reserved.
+          </p>
+          <div className="flex items-center gap-6">
+            {[
+              { label: "Privacy Policy", href: "/privacy" },
+              { label: "Terms of Service", href: "/terms" },
+            ].map(({ label, href }) => (
+              <a
+                key={href}
+                href={href}
+                className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground transition-colors duration-200 hover:text-accent"
+              >
+                {label}
+              </a>
+            ))}
+          </div>
+        </div>
         <p className="font-mono text-[10px] text-muted-foreground">Trained on your data. Styled to your brand.</p>
       </div>
     </section>
