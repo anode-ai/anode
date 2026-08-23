@@ -6,10 +6,13 @@ import { db } from '@anode/supabase';
   providers: [
     {
       provide: 'DRIZZLE_DATABASE_CONNECTION',
-      // 👇 FIX: useFactory dynamically retrieves the connected instance at runtime
       useFactory: () => {
+        // @anode/supabase returns null when DATABASE_URL was missing at import time.
         if (!db) {
-          throw new Error('Drizzle database connection instance is not initialized yet!');
+          throw new Error(
+            'DATABASE_URL is not set, so the Drizzle client could not be created. ' +
+              'Copy .env.example to .env at the monorepo root and set DATABASE_URL.',
+          );
         }
         return db;
       },

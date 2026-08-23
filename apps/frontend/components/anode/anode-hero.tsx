@@ -76,10 +76,10 @@ export function AnodeHero() {
             <BitmapChevron className="transition-transform duration-[400ms] ease-in-out group-hover:rotate-45" />
           </a>
           <a
-            href="#demo"
+            href="/signup"
             className="group inline-flex items-center gap-3 border border-foreground/20 px-6 py-3 font-mono text-xs uppercase tracking-widest text-foreground transition-all duration-200 hover:border-accent hover:text-accent"
           >
-            <ScrambleTextOnHover text="Try The Demo" as="span" duration={0.6} />
+            <ScrambleTextOnHover text="Get Started" as="span" duration={0.6} />
           </a>
         </div>
       </div>

@@ -3,11 +3,17 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useState } from "react"
-import { LayoutGrid, Plus, ArrowUpRight, Menu, X } from "lucide-react"
+import { LayoutGrid, Plus, ArrowUpRight, Menu, X, LogOut } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAnodeStore, MODE_META } from "@/lib/anode-store"
+import { signOut } from "@/app/(auth)/actions"
 
-export function DashboardSidebar() {
+export interface SidebarUser {
+  name?: string
+  email?: string
+}
+
+export function DashboardSidebar({ user }: { user: SidebarUser }) {
   const pathname = usePathname()
   const { bots } = useAnodeStore()
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -110,14 +116,41 @@ export function DashboardSidebar() {
           </Link>
         </nav>
 
-        <Link
-          href="/"
-          onClick={() => setMobileOpen(false)}
-          className="flex items-center justify-between border-t border-border/60 px-5 py-3 font-mono text-[10px] uppercase tracking-[0.15em] text-muted-foreground transition-colors hover:text-foreground"
-        >
-          View site
-          <ArrowUpRight className="h-3 w-3" />
-        </Link>
+        <div className="border-t border-border/60">
+          <div className="flex items-center gap-2.5 px-5 py-3">
+            <span
+              className="flex h-6 w-6 shrink-0 items-center justify-center bg-accent font-mono text-[10px] uppercase text-accent-foreground"
+              aria-hidden="true"
+            >
+              {(user.name ?? user.email ?? "?").charAt(0)}
+            </span>
+            <span className="flex min-w-0 flex-col leading-tight">
+              {user.name && <span className="truncate text-xs text-foreground">{user.name}</span>}
+              <span className="truncate font-mono text-[9px] uppercase tracking-[0.15em] text-muted-foreground">
+                {user.email ?? "Signed in"}
+              </span>
+            </span>
+          </div>
+
+          <Link
+            href="/"
+            onClick={() => setMobileOpen(false)}
+            className="flex items-center justify-between border-t border-border/60 px-5 py-3 font-mono text-[10px] uppercase tracking-[0.15em] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            View site
+            <ArrowUpRight className="h-3 w-3" />
+          </Link>
+
+          <form action={signOut}>
+            <button
+              type="submit"
+              className="flex w-full items-center justify-between border-t border-border/60 px-5 py-3 font-mono text-[10px] uppercase tracking-[0.15em] text-muted-foreground transition-colors hover:text-accent"
+            >
+              Sign out
+              <LogOut className="h-3 w-3" />
+            </button>
+          </form>
+        </div>
       </aside>
 
       {/* Mobile scrim */}
